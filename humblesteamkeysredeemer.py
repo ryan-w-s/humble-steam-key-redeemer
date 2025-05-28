@@ -622,58 +622,125 @@ def redeem_steam_keys(humble_session, humble_keys):
     # Query owned App IDs according to Steam
     owned_app_details = get_owned_apps(session)
 
-    noted_keys = [key for key in humble_keys if key["steam_app_id"] not in owned_app_details.keys()]
+    # --- BEGIN PERFORMANCE OPTIMIZATION 1 ---
+    # Convert owned app IDs to a set of strings for faster lookups
+    owned_app_ids_str_set = set(map(str, owned_app_details.keys()))
+    # --- END PERFORMANCE OPTIMIZATION 1 ---
+
+    # Filter out keys for games already directly owned by steam_app_id
+    # Keep keys if steam_app_id is missing OR if it's not in the owned_app_details
+    noted_keys = [
+        key for key in humble_keys 
+        if key.get("steam_app_id") is None or 
+           str(key.get("steam_app_id")) not in owned_app_ids_str_set # Use the set here
+    ]
+    
     skipped_games = {}
     unownedgames = []
 
-    # Some Steam keys come back with no Steam AppID from Humble
-    # So we do our best to look up from AppIDs (no packages, because can't find an API for it)
-
     filter_live = prompt_filter_live() == "y"
 
+    # Load already_owned.csv data
+    confirmed_owned_humble_gamekeys_local = set()
+    confirmed_owned_steam_keys_local = set()
+    try:
+        with open("already_owned.csv", "r", encoding="utf-8-sig") as f_ao:
+            # write_key doesn't add a header, so no need to skip it here unless manually added.
+            for line in f_ao:
+                parts = line.strip().split(',')
+                if not parts: continue
+                # Humble gamekey (tpkd_dict['gamekey']) is expected in parts[0]
+                if len(parts) >= 1 and parts[0].strip():
+                    confirmed_owned_humble_gamekeys_local.add(parts[0].strip())
+                # Revealed Steam key string is expected in parts[2]
+                if len(parts) >= 3 and parts[2].strip(): 
+                    confirmed_owned_steam_keys_local.add(parts[2].strip())
+        if confirmed_owned_humble_gamekeys_local or confirmed_owned_steam_keys_local:
+            print(f"INFO: Loaded {len(confirmed_owned_humble_gamekeys_local)} Humble gamekeys and {len(confirmed_owned_steam_keys_local)} revealed Steam keys from already_owned.csv for cross-referencing.")
+    except FileNotFoundError:
+        print("INFO: already_owned.csv not found. Cannot pre-skip keys based on it in this session.")
+    except Exception as e:
+        print(f"WARNING: Error reading already_owned.csv for cross-referencing: {e}")
+
     for game in noted_keys:
+        game_humble_key = game.get("gamekey")
+        game_steam_key_val = game.get("redeemed_key_val")
+        human_name_for_log = game.get("human_name", "Unknown Game")
+        
+        is_confirmed_owned_by_csv = False
+        reason_for_skip = ""
+
+        if game_humble_key and game_humble_key in confirmed_owned_humble_gamekeys_local:
+            is_confirmed_owned_by_csv = True
+            reason_for_skip = f"Humble gamekey '{game_humble_key}' found in already_owned.csv."
+        
+        if not is_confirmed_owned_by_csv and game_steam_key_val and game_steam_key_val in confirmed_owned_steam_keys_local:
+            is_confirmed_owned_by_csv = True
+            reason_for_skip = f"Revealed Steam key '{game_steam_key_val}' found in already_owned.csv."
+
+        if is_confirmed_owned_by_csv:
+            print(f"Skipping fuzzy match for '{human_name_for_log}': {reason_for_skip} Will not be re-prompted via skipped.txt.")
+            # Ensure this key's status as 'already owned' is logged correctly in the CSV for this run if it wasn't perfectly captured before.
+            # This helps maintain consistency in already_owned.csv.
+            write_key(9, game) 
+            continue 
+
         best_match = match_ownership(owned_app_details,game,filter_live)
-        if best_match[1] is not None and best_match[1] in owned_app_details.keys():
+        # Ensure owned_app_details keys are compared as strings if best_match[1] is int
+        if best_match[1] is not None and str(best_match[1]) in owned_app_ids_str_set:
             skipped_games[game["human_name"].strip()] = game
         else:
             unownedgames.append(game)
 
     print(
-        "Filtered out game keys that you already own on Steam; {} keys unowned.".format(
+        "Filtered out game keys that you already own on Steam (initial check and CSV); {} keys unowned and proceeding to potential fuzzy match review.".format(
             len(unownedgames)
         )
     )
 
     if len(skipped_games):
         # Skipped games uncertain to be owned by user. Let user choose
-        unownedgames = unownedgames + prompt_skipped(skipped_games)
-        print("{} keys will be attempted.".format(len(unownedgames)))
-        # Preserve original order
-        unownedgames = sorted(unownedgames,key=lambda g: humble_keys.index(g))
+        user_approved_from_skipped = prompt_skipped(skipped_games)
+        unownedgames.extend(user_approved_from_skipped) # Add user approved games to the list
+        # Preserve original order from humble_keys
+        original_indices = {key.get("gamekey"): i for i, key in enumerate(humble_keys)}
+        # Deduplicate while preserving order (important if a game was in unownedgames AND approved from skipped)
+        # A bit more involved to preserve order after deduplication from multiple sources
+        temp_unowned_dict = {original_indices.get(g.get("gamekey"), float('inf')): g for g in unownedgames}
+        sorted_keys_for_dedup = sorted(temp_unowned_dict.keys())
+        unownedgames = [temp_unowned_dict[k] for k in sorted_keys_for_dedup]
+        print(f"{len(unownedgames)} keys will be attempted after review of potential duplicates.")
     
-    redeemed = []
+    if not unownedgames:
+        print("No keys to attempt redeeming in this run.")
+    else:
+        print(f"Attempting to redeem {len(unownedgames)} key(s) on Steam...")
+        
+    redeemed_during_run = set() 
 
     for key in unownedgames:
         print(key["human_name"])
-
-        if key["human_name"] in redeemed or (key["steam_app_id"] != None and key["steam_app_id"] in redeemed):
-            # We've bumped into a repeat of the same game!
-            write_key(9,key)
+        
+        # Using a more robust way to check if already processed in this run
+        # We add a prefix to app_ids to avoid collision with human_names if an app_id could be a string equal to a human_name
+        current_key_app_id_str = f"appid_{key.get('steam_app_id')}" if key.get('steam_app_id') is not None else None
+        
+        if key["human_name"] in redeemed_during_run or \
+           (current_key_app_id_str is not None and current_key_app_id_str in redeemed_during_run):
+            write_key(9,key) # Log as already owned if detected as duplicate within this run
             continue
         else:
-            if key["steam_app_id"] != None:
-                redeemed.append(key["steam_app_id"])
-            redeemed.append(key["human_name"])
+            if current_key_app_id_str is not None:
+                redeemed_during_run.add(current_key_app_id_str)
+            redeemed_during_run.add(key["human_name"]) # Add human_name as a general fallback
 
-        if "redeemed_key_val" not in key:
-            # This key is unredeemed via Humble, trigger redemption process.
-            redeemed_key = redeem_humble_key(humble_session, key)
-            key["redeemed_key_val"] = redeemed_key
-            # Worth noting this will only persist for this loop -- does not get saved to unownedgames' obj
+        if "redeemed_key_val" not in key or not key["redeemed_key_val"]:
+            redeemed_key_val_from_humble = redeem_humble_key(humble_session, key)
+            key["redeemed_key_val"] = redeemed_key_val_from_humble
 
         if not valid_steam_key(key["redeemed_key_val"]):
-            # Most likely humble gift link
-            write_key(1, key)
+            print(f"Invalid or missing Steam key for '{key['human_name']}'. Value: '{key['redeemed_key_val']}'. Skipping Steam redemption.")
+            write_key(1, key) 
             continue
 
         code = _redeem_steam(session, key["redeemed_key_val"])
@@ -826,8 +893,8 @@ def humble_chooser_mode(humble_session,order_details):
                     # These are weird cases that should be handled by Humble.
                     exception = " (Must be redeemed through Humble directly)"
                 print(f"{idx+1}. {title}{rating_text}{exception}")
-            if(redeem_all == None and remaining == len(choices)):
-                redeem_all = prompt_yes_no("Would you like to redeem all?")
+            if(redeem_all == None and remaining >= len(choices)):
+                redeem_all = True
             else:
                 redeem_all = False
             
@@ -875,7 +942,7 @@ def humble_chooser_mode(humble_session,order_details):
                         print("\nGames selected:")
                         for choice in chosen:
                             print(choice["title"])
-                        confirmed = prompt_yes_no("Please type 'y' to confirm your selection")
+                        confirmed = True if redeem_all else prompt_yes_no("Please type 'y' to confirm your selection")
                         if confirmed:
                             choice_month_name = month["product"]["choice_url"]
                             identifier = month["parent_identifier"]
