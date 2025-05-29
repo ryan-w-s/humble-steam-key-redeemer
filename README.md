@@ -1,4 +1,12 @@
 # Humble Steam Key Redeemer
+
+A fork of [humble-steam-key-redeemer](https://github.com/FailSpy/humble-steam-key-redeemer) by FailSpy.
+
+This is focused on further automation with less user interaction and more aggressive error handling and duplicate key detection.
+
+You should probably start with the original project unless you have a specific reason to use this fork.
+
+## Description
 Python utility script to extract Humble keys, and redeem them on Steam automagically by detecting when a game is already owned on Steam.
 
 This is primarily designed to be a set-it-and-forget-it tool that maximizes successful entry of keys into Steam, assuring that no Steam game goes unredeemed.
