@@ -199,6 +199,14 @@ def valid_steam_key(key):
     )
 
 
+def get_item_uid(tpk):
+    # Stable per-item identifier to avoid order-level (gamekey-only) collisions
+    gamekey = str(tpk.get("gamekey", "")).strip()
+    keyindex = str(tpk.get("keyindex", "")).strip()
+    machine_name = str(tpk.get("machine_name", "")).strip()
+    return f"{gamekey}::{keyindex}::{machine_name}"
+
+
 def try_recover_cookies(cookie_file, session):
     try:
         cookies = pickle.load(open(cookie_file,"rb"))
@@ -498,6 +506,7 @@ files = {}
 def write_key(code, key):
     global files
 
+    # Aggregated legacy files (back-compat)
     filename = "redeemed.csv"
     if code == 15 or code == 9:
         filename = "already_owned.csv"
@@ -506,13 +515,43 @@ def write_key(code, key):
 
     if filename not in files:
         files[filename] = open(filename, "a", encoding="utf-8-sig")
-    key["human_name"] = key["human_name"].replace(",", ".")
-    gamekey = key.get('gamekey')
-    human_name = key.get("human_name")
-    redeemed_key_val = key.get("redeemed_key_val")
-    output = f"{gamekey},{human_name},{redeemed_key_val}\n"
+
+    human_name_value = str(key.get("human_name", "")).replace(",", ".")
+    gamekey = str(key.get('gamekey', ""))
+    redeemed_key_val = str(key.get("redeemed_key_val", ""))
+    output = f"{gamekey},{human_name_value},{redeemed_key_val}\n"
     files[filename].write(output)
     files[filename].flush()
+
+    # Reason-based files (compact, human-friendly)
+    def write_reason_row(filename_reason, key_reason, reason):
+        if not filename_reason:
+            return
+        if filename_reason not in files:
+            files[filename_reason] = open(filename_reason, "a", encoding="utf-8-sig")
+        human_name_value_local = str(key_reason.get("human_name", "")).replace(",", ".")
+        gamekey_local = str(key_reason.get('gamekey', ""))
+        redeemed_key_val_local = str(key_reason.get("redeemed_key_val", ""))
+        steam_app_id_local = str(key_reason.get("steam_app_id", ""))
+        uid_local = get_item_uid(key_reason)
+        row_local = f"{gamekey_local},{human_name_value_local},{redeemed_key_val_local},{steam_app_id_local},{uid_local},{reason}\n"
+        files[filename_reason].write(row_local)
+        files[filename_reason].flush()
+
+    reason_file = None
+    if code == 0:
+        reason_file = None  # success is fully captured by redeemed.csv
+    elif code in (9, 15):
+        reason_file = "owned_steam.csv"
+    elif code in (14, 13, 50):
+        reason_file = "errors_permanent.csv"
+    elif code in (24, 36):
+        reason_file = "errors_blocked.csv"
+    elif code != 53:  # exclude rate limit; we retry until it changes
+        reason_file = "errors_unknown.csv"
+    # If code == 53 we don't log here (we spin until non-53)
+    if reason_file:
+        write_reason_row(reason_file, key, str(code))
 
 
 def prompt_skipped(skipped_games):
@@ -629,34 +668,45 @@ def redeem_steam_keys(humble_session, humble_keys):
 
     # Filter out keys for games already directly owned by steam_app_id
     # Keep keys if steam_app_id is missing OR if it's not in the owned_app_details
-    noted_keys = [
-        key for key in humble_keys 
-        if key.get("steam_app_id") is None or 
-           str(key.get("steam_app_id")) not in owned_app_ids_str_set # Use the set here
-    ]
+    noted_keys = []
+    for key in humble_keys:
+        steam_app_id_value = key.get("steam_app_id")
+        if steam_app_id_value is not None and str(steam_app_id_value) in owned_app_ids_str_set:
+            # Log pre-check ownership by appid
+            temp_key = dict(key)
+            write_key(9, temp_key)  # still writes to legacy already_owned.csv for back-compat
+            # Reason-based file for pre-check
+            if "owned_appid.csv" not in files:
+                files["owned_appid.csv"] = open("owned_appid.csv", "a", encoding="utf-8-sig")
+            human_name_value = str(key.get("human_name", "")).replace(",", ".")
+            gamekey = str(key.get('gamekey', ""))
+            redeemed_key_val = str(key.get("redeemed_key_val", ""))
+            steam_app_id_str = str(steam_app_id_value)
+            uid = get_item_uid(key)
+            files["owned_appid.csv"].write(f"{gamekey},{human_name_value},{redeemed_key_val},{steam_app_id_str},{uid},owned_by_appid\n")
+            files["owned_appid.csv"].flush()
+            continue
+        noted_keys.append(key)
     
     skipped_games = {}
     unownedgames = []
 
     filter_live = prompt_filter_live() == "y"
 
-    # Load already_owned.csv data
-    confirmed_owned_humble_gamekeys_local = set()
+    # Load historical data for cross-run dedupe
     confirmed_owned_steam_keys_local = set()
+    confirmed_item_uids_local = set()
     try:
         with open("already_owned.csv", "r", encoding="utf-8-sig") as f_ao:
             # write_key doesn't add a header, so no need to skip it here unless manually added.
             for line in f_ao:
                 parts = line.strip().split(',')
                 if not parts: continue
-                # Humble gamekey (tpkd_dict['gamekey']) is expected in parts[0]
-                if len(parts) >= 1 and parts[0].strip():
-                    confirmed_owned_humble_gamekeys_local.add(parts[0].strip())
                 # Revealed Steam key string is expected in parts[2]
                 if len(parts) >= 3 and parts[2].strip(): 
                     confirmed_owned_steam_keys_local.add(parts[2].strip())
-        if confirmed_owned_humble_gamekeys_local or confirmed_owned_steam_keys_local:
-            print(f"INFO: Loaded {len(confirmed_owned_humble_gamekeys_local)} Humble gamekeys and {len(confirmed_owned_steam_keys_local)} revealed Steam keys from already_owned.csv for cross-referencing.")
+        if confirmed_owned_steam_keys_local:
+            print(f"INFO: Loaded {len(confirmed_owned_steam_keys_local)} revealed Steam keys from already_owned.csv for cross-referencing.")
     except FileNotFoundError:
         print("INFO: already_owned.csv not found. Cannot pre-skip keys based on it in this session.")
     except Exception as e:
@@ -666,17 +716,18 @@ def redeem_steam_keys(humble_session, humble_keys):
         game_humble_key = game.get("gamekey")
         game_steam_key_val = game.get("redeemed_key_val")
         human_name_for_log = game.get("human_name", "Unknown Game")
+        current_item_uid = get_item_uid(game)
         
         is_confirmed_owned_by_csv = False
         reason_for_skip = ""
 
-        if game_humble_key and game_humble_key in confirmed_owned_humble_gamekeys_local:
-            is_confirmed_owned_by_csv = True
-            reason_for_skip = f"Humble gamekey '{game_humble_key}' found in already_owned.csv."
-        
-        if not is_confirmed_owned_by_csv and game_steam_key_val and game_steam_key_val in confirmed_owned_steam_keys_local:
+        # Only skip by exact revealed key or per-item uid, not by order-level gamekey
+        if game_steam_key_val and game_steam_key_val in confirmed_owned_steam_keys_local:
             is_confirmed_owned_by_csv = True
             reason_for_skip = f"Revealed Steam key '{game_steam_key_val}' found in already_owned.csv."
+        elif current_item_uid and current_item_uid in confirmed_item_uids_local:
+            is_confirmed_owned_by_csv = True
+            reason_for_skip = f"Item UID '{current_item_uid}' found in granular logs."
 
         if is_confirmed_owned_by_csv:
             print(f"Skipping fuzzy match for '{human_name_for_log}': {reason_for_skip} Will not be re-prompted via skipped.txt.")
@@ -702,6 +753,19 @@ def redeem_steam_keys(humble_session, humble_keys):
         # Skipped games uncertain to be owned by user. Let user choose
         user_approved_from_skipped = prompt_skipped(skipped_games)
         unownedgames.extend(user_approved_from_skipped) # Add user approved games to the list
+        # Write the not-approved fuzzy skips to owned_fuzzy.csv
+        fuzzy_skipped = [g for name,g in skipped_games.items() if g not in user_approved_from_skipped]
+        if len(fuzzy_skipped):
+            if "owned_fuzzy.csv" not in files:
+                files["owned_fuzzy.csv"] = open("owned_fuzzy.csv", "a", encoding="utf-8-sig")
+            for g in fuzzy_skipped:
+                human_name_value = str(g.get("human_name", "")).replace(",", ".")
+                gamekey = str(g.get('gamekey', ""))
+                redeemed_key_val = str(g.get("redeemed_key_val", ""))
+                steam_app_id_str = str(g.get("steam_app_id", ""))
+                uid = get_item_uid(g)
+                files["owned_fuzzy.csv"].write(f"{gamekey},{human_name_value},{redeemed_key_val},{steam_app_id_str},{uid},fuzzy_skip\n")
+            files["owned_fuzzy.csv"].flush()
         # Preserve original order from humble_keys
         original_indices = {key.get("gamekey"): i for i, key in enumerate(humble_keys)}
         # Deduplicate while preserving order (important if a game was in unownedgames AND approved from skipped)
@@ -721,18 +785,19 @@ def redeem_steam_keys(humble_session, humble_keys):
     for key in unownedgames:
         print(key["human_name"])
         
-        # Using a more robust way to check if already processed in this run
-        # We add a prefix to app_ids to avoid collision with human_names if an app_id could be a string equal to a human_name
+        # Per-run duplicate guard based on per-item UID and appid
         current_key_app_id_str = f"appid_{key.get('steam_app_id')}" if key.get('steam_app_id') is not None else None
+        current_item_uid = get_item_uid(key)
         
-        if key["human_name"] in redeemed_during_run or \
+        if (current_item_uid and current_item_uid in redeemed_during_run) or \
            (current_key_app_id_str is not None and current_key_app_id_str in redeemed_during_run):
             write_key(9,key) # Log as already owned if detected as duplicate within this run
             continue
         else:
             if current_key_app_id_str is not None:
                 redeemed_during_run.add(current_key_app_id_str)
-            redeemed_during_run.add(key["human_name"]) # Add human_name as a general fallback
+            if current_item_uid:
+                redeemed_during_run.add(current_item_uid)
 
         if "redeemed_key_val" not in key or not key["redeemed_key_val"]:
             redeemed_key_val_from_humble = redeem_humble_key(humble_session, key)
@@ -992,16 +1057,21 @@ if __name__=="__main__":
     revealed_keys = []
     steam_keys = list(find_dict_keys(order_details,"steam_app_id",True))
 
-    filters = ["errored.csv", "already_owned.csv", "redeemed.csv"]
+    # Pre-run filtering: only suppress by terminal outcomes
+    # Files used: redeemed.csv, owned_steam.csv, errors_permanent.csv, owned_appid.csv
     original_length = len(steam_keys)
-    for filter_file in filters:
+    suppress_keys = set()
+    suppress_files = ["redeemed.csv", "owned_steam.csv", "errors_permanent.csv", "owned_appid.csv"]
+    for filter_file in suppress_files:
         try:
-            with open(filter_file, "r") as f:
-                keycols = f.read()
-            filtered_keys = [keycol.strip() for keycol in keycols.replace("\n", ",").split(",")]
-            steam_keys = [key for key in steam_keys if key.get("redeemed_key_val",False) not in filtered_keys]
+            with open(filter_file, "r", encoding="utf-8-sig") as f:
+                for line in f:
+                    parts = line.strip().split(',')
+                    if len(parts) >= 3 and parts[2].strip():
+                        suppress_keys.add(parts[2].strip())
         except FileNotFoundError:
             pass
+    steam_keys = [key for key in steam_keys if not key.get("redeemed_key_val") or key.get("redeemed_key_val") not in suppress_keys]
     if len(steam_keys) != original_length:
         print("Filtered {} keys from previous runs".format(original_length - len(steam_keys)))
 
