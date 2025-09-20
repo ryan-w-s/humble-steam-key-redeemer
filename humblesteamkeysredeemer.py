@@ -669,9 +669,30 @@ def redeem_steam_keys(humble_session, humble_keys):
     # Filter out keys for games already directly owned by steam_app_id
     # Keep keys if steam_app_id is missing OR if it's not in the owned_app_details
     noted_keys = []
+    # Historical owned-by-appid across previous runs (from logs)
+    historical_owned_appids = set()
+    for history_file in ("owned_steam.csv", "owned_appid.csv"):
+        try:
+            with open(history_file, "r", encoding="utf-8-sig") as f_hist:
+                for line in f_hist:
+                    parts = line.strip().split(',')
+                    if len(parts) >= 4 and parts[3] and parts[3].strip().isdigit():
+                        historical_owned_appids.add(parts[3].strip())
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"WARNING: Error reading {history_file} for appid cross-referencing: {e}")
+    if historical_owned_appids:
+        print(f"INFO: Loaded {len(historical_owned_appids)} historical Steam appids from logs for cross-referencing.")
+
     for key in humble_keys:
         steam_app_id_value = key.get("steam_app_id")
-        if steam_app_id_value is not None and str(steam_app_id_value) in owned_app_ids_str_set:
+        if (
+            steam_app_id_value is not None and (
+                str(steam_app_id_value) in owned_app_ids_str_set or
+                str(steam_app_id_value) in historical_owned_appids
+            )
+        ):
             # Log pre-check ownership by appid
             temp_key = dict(key)
             write_key(9, temp_key)  # still writes to legacy already_owned.csv for back-compat
@@ -711,6 +732,38 @@ def redeem_steam_keys(humble_session, humble_keys):
         print("INFO: already_owned.csv not found. Cannot pre-skip keys based on it in this session.")
     except Exception as e:
         print(f"WARNING: Error reading already_owned.csv for cross-referencing: {e}")
+
+    # Also consult owned_steam.csv for definitive owned results with stable item UIDs
+    try:
+        with open("owned_steam.csv", "r", encoding="utf-8-sig") as f_os:
+            for line in f_os:
+                parts = line.strip().split(',')
+                if not parts:
+                    continue
+                # Add revealed Steam keys, if present
+                if len(parts) >= 3 and parts[2].strip():
+                    confirmed_owned_steam_keys_local.add(parts[2].strip())
+                # Add per-item UIDs for unrevealed/rehydrated comparisons
+                if len(parts) >= 5 and parts[4].strip():
+                    confirmed_item_uids_local.add(parts[4].strip())
+        if confirmed_item_uids_local:
+            print(f"INFO: Loaded {len(confirmed_item_uids_local)} item UIDs from owned_steam.csv for cross-referencing.")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"WARNING: Error reading owned_steam.csv for cross-referencing: {e}")
+
+    # Also consult owned_appid.csv for owned-by-appid determinations
+    try:
+        with open("owned_appid.csv", "r", encoding="utf-8-sig") as f_oa:
+            for line in f_oa:
+                parts = line.strip().split(',')
+                if len(parts) >= 5 and parts[4].strip():
+                    confirmed_item_uids_local.add(parts[4].strip())
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"WARNING: Error reading owned_appid.csv for cross-referencing: {e}")
 
     for game in noted_keys:
         game_humble_key = game.get("gamekey")
@@ -1071,7 +1124,39 @@ if __name__=="__main__":
                         suppress_keys.add(parts[2].strip())
         except FileNotFoundError:
             pass
-    steam_keys = [key for key in steam_keys if not key.get("redeemed_key_val") or key.get("redeemed_key_val") not in suppress_keys]
+    # Also suppress by stable per-item UID from owned_steam.csv and owned_appid.csv so we do not prompt again
+    suppress_uids = set()
+    for uid_source in ("owned_steam.csv", "owned_appid.csv"):
+        try:
+            with open(uid_source, "r", encoding="utf-8-sig") as f_uid:
+                for line in f_uid:
+                    parts = line.strip().split(',')
+                    if len(parts) >= 5 and parts[4].strip():
+                        suppress_uids.add(parts[4].strip())
+        except FileNotFoundError:
+            pass
+
+    # Also suppress by Steam appid based on history from owned_steam.csv and owned_appid.csv
+    suppress_appids = set()
+    for appid_source in ("owned_steam.csv", "owned_appid.csv"):
+        try:
+            with open(appid_source, "r", encoding="utf-8-sig") as f_app:
+                for line in f_app:
+                    parts = line.strip().split(',')
+                    if len(parts) >= 4 and parts[3] and parts[3].strip().isdigit():
+                        suppress_appids.add(parts[3].strip())
+        except FileNotFoundError:
+            pass
+
+    steam_keys = [
+        key for key in steam_keys
+        if (
+            not key.get("redeemed_key_val") or key.get("redeemed_key_val") not in suppress_keys
+        ) and get_item_uid(key) not in suppress_uids
+        and (
+            not key.get("steam_app_id") or str(key.get("steam_app_id")) not in suppress_appids
+        )
+    ]
     if len(steam_keys) != original_length:
         print("Filtered {} keys from previous runs".format(original_length - len(steam_keys)))
 
