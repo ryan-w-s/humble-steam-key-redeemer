@@ -4,6 +4,7 @@ from selenium.common.exceptions import WebDriverException
 from fuzzywuzzy import fuzz
 import steam.webauth as wa
 import time
+import re
 import pickle
 from pwinput import pwinput
 import os
@@ -197,6 +198,18 @@ def valid_steam_key(key):
         and len(key_parts) == 3
         and all(len(part) == 5 for part in key_parts)
     )
+
+
+def normalize_title(title):
+    # Stricter normalization for exact comparisons: case-insensitive,
+    # remove trademark symbols and punctuation, collapse whitespace.
+    if not isinstance(title, str):
+        return ""
+    normalized = title.casefold()
+    normalized = normalized.replace("\u2122", "").replace("\u00ae", "").replace("\u00a9", "")
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
 
 
 def get_item_uid(tpk):
@@ -608,39 +621,41 @@ def get_owned_apps(steam_session):
     return owned_app_details
 
 def match_ownership(owned_app_details, game, filter_live):
-    threshold = 70
-    best_match = (0, None)
-    # Do a string search based on product names.
-    matches = [
-        (fuzz.token_set_ratio(appname, game["human_name"]), appid)
-        for appid, appname in owned_app_details.items()
-    ]
-    refined_matches = [
-        (fuzz.token_sort_ratio(owned_app_details[appid], game["human_name"]), appid)
-        for score, appid in matches
-        if score > threshold
-    ]
-    
-    if filter_live and len(refined_matches) > 0:
-        cls()
-        best_match = max(refined_matches, key=lambda item: item[0])
-        if best_match[0] == 100:
-            return best_match
-        print("steam games you own")
-        for match in refined_matches:
-            print(f"     {owned_app_details[match[1]]}: {match[0]}")
-        if prompt_yes_no(f"Is \"{game['human_name']}\" in the above list?"):
-            return refined_matches[0]
-        else:
-            return (0,None)
-    else:
+    # Strict matching: only auto-match when normalized titles are exactly equal.
+    target_name_norm = normalize_title(str(game.get("human_name", "")))
+
+    exact_matches = []
+    for appid, appname in owned_app_details.items():
+        if normalize_title(appname) == target_name_norm:
+            exact_matches.append((100, appid))
+
+    if exact_matches:
+        # If multiple, choose the one with highest score (all 100) and stable order
+        best_match = max(exact_matches, key=lambda item: item[0])
+        return best_match
+
+    # No exact normalized match found. In interactive mode, allow very high-similarity review only.
+    if filter_live:
+        matches = [
+            (fuzz.token_sort_ratio(appname, str(game.get("human_name", ""))), appid)
+            for appid, appname in owned_app_details.items()
+        ]
+        refined_matches = [(score, appid) for score, appid in matches if score >= 90]
+
         if len(refined_matches) > 0:
+            cls()
             best_match = max(refined_matches, key=lambda item: item[0])
-        elif len(refined_matches) == 1:
-            best_match = refined_matches[0]
-        if best_match[0] < 35:
-            best_match = (0,None)
-    return best_match
+            if best_match[0] == 100:
+                return best_match
+            print("steam games you own")
+            for match in refined_matches:
+                print(f"     {owned_app_details[match[1]]}: {match[0]}")
+            if prompt_yes_no(f"Is \"{game['human_name']}\" in the above list?"):
+                return refined_matches[0]
+        return (0, None)
+
+    # Non-interactive: do not accept fuzzy matches.
+    return (0, None)
 
 def prompt_filter_live():
     mode = None
