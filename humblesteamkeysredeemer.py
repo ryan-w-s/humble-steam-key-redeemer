@@ -83,20 +83,31 @@ var getHumbleOrderDetails = async (list) => {
       orders = list.map(item => ({ gamekey: item }));
     } else {
       const response = await fetch(HUMBLE_ORDERS_API_URL);
-      orders = await response.json();
+      try {
+        orders = await response.json();
+      } catch (e) {
+        const text = await response.text();
+        throw new Error(`Failed to parse JSON: ${e}. Status: ${response.status}. Body: ${text.substring(0, 500)}`);
+      }
     }
     const orderDetailsPromises = orders.map(async (order) => {
       const orderDetailsUrl = `${HUMBLE_ORDER_DETAILS_API}${order['gamekey']}?all_tpkds=true`;
       const orderDetailsResponse = await fetch(orderDetailsUrl);
-      const orderDetails = await orderDetailsResponse.json();
-      return orderDetails;
+      const text = await orderDetailsResponse.text();
+      try {
+        const orderDetails = JSON.parse(text);
+        return orderDetails;
+      } catch (e) {
+        return { error: `Order ${order['gamekey']} failed: ${e}. Status: ${orderDetailsResponse.status}. Body start: ${text.substring(0, 500)}` };
+      }
     });
 
     const orderDetailsArray = await Promise.all(orderDetailsPromises);
     return orderDetailsArray;
+    return orderDetailsArray;
   } catch (error) {
     console.error('Error:', error);
-    return [];
+    return [{'error': error.toString()}];
   }
 };
 
@@ -149,6 +160,7 @@ def get_headless_driver():
             options = opt()
             if d == webdriver.Chrome:
                 options.add_argument("--headless=new")
+                options.set_capability('goog:loggingPrefs', {'browser': 'ALL'})
             else:
                 options.add_argument("-headless")
             driver = d(options=options)
@@ -1132,12 +1144,63 @@ if __name__=="__main__":
     # Create a consistent session for Humble API use
     driver = get_headless_driver()
     humble_login(driver)
-    print("Successfully signed in on Humble.")
+    print("Successfully signed in on Humble.", flush=True)
+    
+    # Ensure we are on the right page for the fetch context
+    print("Navigating to keys page...", flush=True)
+    driver.get(HUMBLE_KEYS_PAGE)
 
-    print(f"Getting order details, please wait")
+    print(f"Getting order details, please wait", flush=True)
 
     order_details = driver.execute_async_script(getHumbleOrders.replace('%optional%',''))
 
+    # --- DEBUG: Diagnose what the Humble API returned ---
+    if order_details is None:
+        print("DEBUG: order_details is None! The Humble API call may have failed.", flush=True)
+        try:
+            for entry in driver.get_log('browser'):
+                print(f"BROWSER LOG: {entry}", flush=True)
+        except:
+            print("Could not retrieve browser logs.", flush=True)
+    elif isinstance(order_details, list):
+        print(f"DEBUG: Received {len(order_details)} orders from Humble.", flush=True)
+        
+        # Check for JS error return
+        if len(order_details) == 1 and isinstance(order_details[0], dict) and "error" in order_details[0]:
+            print(f"DEBUG: JS Error detected: {order_details[0]['error']}", flush=True)
+
+        if len(order_details) == 0:
+            print("DEBUG: Zero orders returned. Checking browser logs for errors...", flush=True)
+            try:
+                for entry in driver.get_log('browser'):
+                    print(f"BROWSER LOG: {entry}", flush=True)
+            except:
+                print("Could not retrieve browser logs.", flush=True)
+        if len(order_details) > 0:
+            # Count total tpks and steam tpks
+            all_tpks = list(find_dict_keys(order_details, "tpkd_dict"))
+            all_steam = list(find_dict_keys(order_details, "steam_app_id", True))
+            all_key_types = list(find_dict_keys(order_details, "key_type"))
+            print(f"DEBUG: Found {len(all_tpks)} tpkd_dict entries, {len(all_steam)} with steam_app_id.", flush=True)
+            if all_key_types:
+                from collections import Counter
+                type_counts = Counter(all_key_types)
+                print(f"DEBUG: Key types: {dict(type_counts)}", flush=True)
+            if len(all_steam) == 0 and len(order_details) > 0:
+                # Show a sample of the first order to understand structure
+                sample = order_details[0]
+                print(f"DEBUG: First order keys: {list(sample.keys()) if isinstance(sample, dict) else type(sample)}", flush=True)
+                if isinstance(sample, dict) and "tpkd_dict" in sample:
+                    tpkd = sample["tpkd_dict"]
+                    if isinstance(tpkd, dict) and "all_tpks" in tpkd:
+                        tpks = tpkd["all_tpks"]
+                        if isinstance(tpks, list) and len(tpks) > 0:
+                            print(f"DEBUG: First tpk keys: {list(tpks[0].keys()) if isinstance(tpks[0], dict) else type(tpks[0])}", flush=True)
+    else:
+        print(f"DEBUG: order_details is unexpected type: {type(order_details)}", flush=True)
+    # --- END DEBUG ---
+
+    time.sleep(1) # Wait for debug output to flush
     desired_mode = prompt_mode(order_details,driver)
     if(desired_mode == "2"):
         export_mode(driver,order_details)
