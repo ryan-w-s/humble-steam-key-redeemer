@@ -227,9 +227,22 @@ def try_recover_cookies(cookie_file, session):
             # handle Steam session
             session.cookies.update(cookies)
         else:
-            # handle WebDriver
+            # handle WebDriver — add cookies individually so one bad/expired
+            # cookie doesn't prevent all others from loading.
+            loaded = 0
+            now = time.time()
             for cookie in cookies:
-                session.add_cookie(cookie)
+                try:
+                    # Skip cookies that have already expired
+                    expiry = cookie.get("expiry")
+                    if expiry is not None and expiry < now:
+                        continue
+                    session.add_cookie(cookie)
+                    loaded += 1
+                except Exception:
+                    pass
+            if loaded == 0:
+                return False
         return True
     except Exception as e:
         return False
@@ -613,11 +626,25 @@ def prompt_yes_no(question):
 def get_owned_apps(steam_session):
     owned_content = steam_session.get(STEAM_USERDATA_API).json()
     owned_app_ids = owned_content["rgOwnedPackages"] + owned_content["rgOwnedApps"]
-    owned_app_details = {
-        app["appid"]: app["name"]
-        for app in steam_session.get(STEAM_APP_LIST_API).json()["applist"]["apps"]
-        if app["appid"] in owned_app_ids
-    }
+
+    # Try to resolve app IDs to names via the Steam app list API.
+    # This endpoint was deprecated by Valve and may return 404 or empty responses.
+    try:
+        app_list_resp = steam_session.get(STEAM_APP_LIST_API)
+        app_list_resp.raise_for_status()
+        all_apps = app_list_resp.json()["applist"]["apps"]
+        owned_app_details = {
+            app["appid"]: app["name"]
+            for app in all_apps
+            if app["appid"] in owned_app_ids
+        }
+    except Exception as e:
+        print(f"WARNING: Could not fetch Steam app list ({e}).")
+        print("  The ISteamApps/GetAppList API may have been deprecated by Valve.")
+        print("  Falling back to app-ID-only ownership checks (fuzzy name matching disabled).")
+        # Return owned IDs with empty names so appid-based filtering still works.
+        owned_app_details = {appid: "" for appid in owned_app_ids}
+
     return owned_app_details
 
 def match_ownership(owned_app_details, game, filter_live):

@@ -1,0 +1,17 @@
+[project]
+name = "humble-steam-key-redeemer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fuzzywuzzy>=0.17.0",
+    "pwinput>=1.0.3",
+    "python-levenshtein>=0.27.3",
+    "requests>=2.25.1",
+    "selenium>=4.10.0",
+    "steam",
+]
+
+[tool.uv.sources]
+steam = { git = "https://github.com/FailSpy/steam-py-lib", rev = "master" }

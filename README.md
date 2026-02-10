@@ -1,5 +1,13 @@
 # Humble Steam Key Redeemer
 
+The script can be run using `uv`:
+
+    uv run humblesteamkeysredeemer.py
+
+Or using the provided batch file:
+
+    run_redeemer_uv.bat
+
 A fork of [humble-steam-key-redeemer](https://github.com/FailSpy/humble-steam-key-redeemer) by FailSpy.
 
 This is focused on further automation with less user interaction and more aggressive error handling and duplicate key detection.
