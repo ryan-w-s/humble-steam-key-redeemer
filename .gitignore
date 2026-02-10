@@ -151,3 +151,5 @@ dmypy.json
 
 .idea/
 .humblecookies
+debug_output.txt
+output.txt
